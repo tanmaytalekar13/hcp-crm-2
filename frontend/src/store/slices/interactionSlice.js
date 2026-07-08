@@ -1,10 +1,20 @@
 import { createSlice, createAsyncThunk } from '@reduxjs/toolkit'
 import { apiGet } from '../../api/client'
 
+const parseIsoAsUtc = (value) => {
+  if (!value) return null
+  const text = String(value).trim()
+  if (!text) return null
+  const hasTimezone = /([zZ]|[+-]\d{2}:?\d{2})$/.test(text)
+  const iso = hasTimezone ? text : `${text}Z`
+  const date = new Date(iso)
+  return Number.isNaN(date.getTime()) ? null : date
+}
+
 const formatLocalDatetime = (value) => {
   if (!value) return ''
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return ''
+  const date = typeof value === 'string' ? parseIsoAsUtc(value) : new Date(value)
+  if (!date || Number.isNaN(date.getTime())) return ''
   const pad = (n) => String(n).padStart(2, '0')
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
