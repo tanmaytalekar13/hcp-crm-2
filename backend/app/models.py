@@ -63,7 +63,7 @@ class Interaction(Base):
     next_action = Column(Text, nullable=True)
     follow_up_date = Column(DateTime, nullable=True)
 
-    created_via = Column(String, default="form")  # "form" or "chat"
+    created_via = Column(String, default="chat")
     is_edited = Column(Boolean, default=False)
     edit_history = Column(JSONB, nullable=True)     # list of prior versions for audit trail
 

@@ -75,7 +75,14 @@ async def chat_stream(payload: schemas.ChatRequest, db: Session = Depends(get_db
                                 "event": "tool_result",
                                 "data": json.dumps({"tool": message.name, "result": tool_result_raw}),
                             }
-                            if message.name in ("log_interaction", "edit_interaction"):
+                            if message.name in (
+                                "log_interaction",
+                                "edit_interaction",
+                                "schedule_followup",
+                                "add_materials_shared",
+                                "add_samples_distributed",
+                                "record_outcome",
+                            ):
                                 try:
                                     parsed = json.loads(tool_result_raw)
                                     if "interaction" in parsed:

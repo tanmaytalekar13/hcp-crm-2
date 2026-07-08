@@ -5,6 +5,15 @@ import { applyAgentFormUpdate } from './interactionSlice'
 
 const sessionId = uuidv4()
 
+const formatJson = (value) => {
+  try {
+    const parsed = typeof value === 'string' ? JSON.parse(value) : value
+    return JSON.stringify(parsed, null, 2)
+  } catch {
+    return typeof value === 'string' ? value : JSON.stringify(value, null, 2)
+  }
+}
+
 export const sendMessage = createAsyncThunk(
   'chat/sendMessage',
   async (userText, { dispatch }) => {
@@ -16,21 +25,24 @@ export const sendMessage = createAsyncThunk(
       if (event === 'tool_call') {
         dispatch(
           chatSlice.actions.addToolEvent({
-            label: `Calling tool: ${data.tool}`,
-            detail: JSON.stringify(data.args),
+            name: data.tool,
+            status: 'calling',
+            detail: formatJson(data.args),
           })
         )
       } else if (event === 'tool_result') {
         dispatch(
           chatSlice.actions.addToolEvent({
-            label: `${data.tool} → done`,
-            detail: data.result,
+            name: data.tool,
+            status: 'done',
+            detail: formatJson(data.result),
           })
         )
       } else if (event === 'token') {
         dispatch(chatSlice.actions.appendAssistantText(data.text))
       } else if (event === 'form_update') {
         dispatch(applyAgentFormUpdate(data))
+        dispatch(chatSlice.actions.markFormFilled(data))
       } else if (event === 'done') {
         dispatch(chatSlice.actions.finalizeAssistantMessage(data.final_text))
       }
@@ -58,7 +70,7 @@ const chatSlice = createSlice({
       state.messages.push(action.payload)
     },
     beginAssistantMessage(state) {
-      state.messages.push({ role: 'assistant', content: '', tools: [] })
+      state.messages.push({ role: 'assistant', content: '', tools: [], formFilled: null })
     },
     appendAssistantText(state, action) {
       const last = state.messages[state.messages.length - 1]
@@ -67,7 +79,36 @@ const chatSlice = createSlice({
     addToolEvent(state, action) {
       const last = state.messages[state.messages.length - 1]
       if (!last.tools) last.tools = []
-      last.tools.push(action.payload)
+      const incoming = action.payload
+      if (incoming.status === 'done') {
+        const existing = [...last.tools]
+          .reverse()
+          .find((tool) => tool.name === incoming.name && tool.status === 'calling')
+        if (existing) {
+          existing.status = 'done'
+          existing.detail = incoming.detail
+          return
+        }
+      }
+      last.tools.push(incoming)
+    },
+    markFormFilled(state, action) {
+      const last = state.messages[state.messages.length - 1]
+      const interaction = action.payload || {}
+      const filledFields = [
+        interaction.hcp_name,
+        interaction.summary,
+        interaction.next_action,
+        interaction.topics_discussed?.length,
+        interaction.products_discussed?.length,
+        interaction.samples_distributed?.length,
+      ].filter(Boolean).length
+
+      last.formFilled = {
+        hcpName: interaction.hcp_name || 'interaction',
+        filledFields,
+        interactionId: interaction.id,
+      }
     },
     finalizeAssistantMessage(state, action) {
       const last = state.messages[state.messages.length - 1]

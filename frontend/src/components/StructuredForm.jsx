@@ -1,144 +1,138 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect } from 'react'
 import { useDispatch, useSelector } from 'react-redux'
-import { fetchHcps, updateField, submitFormInteraction, resetForm } from '../store/slices/interactionSlice'
+import { fetchHcps } from '../store/slices/interactionSlice'
 
 const arrayToText = (arr) => (Array.isArray(arr) ? arr.join(', ') : '')
-const textToArray = (text) =>
-  text.split(',').map((s) => s.trim()).filter(Boolean)
+const toDateInput = (value) => (value ? value.slice(0, 10) : '')
+const toTimeInput = (value) => (value ? value.slice(11, 16) : '')
 
-export default function StructuredForm({ readOnlyHint = false }) {
+export default function StructuredForm() {
   const dispatch = useDispatch()
   const form = useSelector((state) => state.interaction.form)
   const hcps = useSelector((state) => state.interaction.hcps)
-  const status = useSelector((state) => state.interaction.status)
+  const selectedHcp = hcps.find((h) => h.id === form.hcp_id)
+  const hcpDisplayName = selectedHcp
+    ? `${selectedHcp.name} - ${selectedHcp.specialty}`
+    : form.hcp_name
 
   useEffect(() => {
     dispatch(fetchHcps())
   }, [dispatch])
 
-  const set = (field) => (e) => dispatch(updateField({ field, value: e.target.value }))
-  const setArray = (field) => (e) =>
-    dispatch(updateField({ field, value: textToArray(e.target.value) }))
-
-  const handleSave = () => dispatch(submitFormInteraction(form))
-
   return (
-    <div className="card">
-      <h2>{readOnlyHint ? 'Structured Interaction (auto-filled by chat)' : 'Log Interaction — Form'}</h2>
+    <section className="interaction-panel">
+      <div className="panel-title">Interaction Details</div>
 
-      {readOnlyHint && (
-        <p className="hint-text" style={{ marginTop: -8, marginBottom: 14 }}>
-          These fields fill in automatically as you chat. You can tweak anything
-          below and hit Save to persist your edits.
-        </p>
-      )}
+      <div className="form-grid two-col">
+        <div className="field">
+          <label>HCP Name</label>
+          <input
+            value={hcpDisplayName || ''}
+            placeholder="Search or select HCP..."
+            readOnly
+            disabled
+          />
+        </div>
 
-      <div className="field">
-        <label>HCP</label>
-        <select value={form.hcp_id} onChange={set('hcp_id')}>
-          <option value="">Select an HCP…</option>
-          {hcps.map((h) => (
-            <option key={h.id} value={h.id}>
-              {h.name} — {h.specialty} ({h.city})
-            </option>
-          ))}
-        </select>
+        <div className="field">
+          <label>Interaction Type</label>
+          <select value={form.interaction_type} disabled>
+            <option value="visit">Meeting</option>
+            <option value="call">Phone Call</option>
+            <option value="email">Email</option>
+            <option value="conference">Conference</option>
+            <option value="sample_drop">Sample Drop</option>
+          </select>
+        </div>
+
+        <div className="field">
+          <label>Date</label>
+          <input type="date" value={toDateInput(form.interaction_date)} readOnly disabled />
+        </div>
+
+        <div className="field">
+          <label>Time</label>
+          <input type="time" value={toTimeInput(form.interaction_date)} readOnly disabled />
+        </div>
       </div>
 
       <div className="field">
-        <label>Interaction Type</label>
-        <select value={form.interaction_type} onChange={set('interaction_type')}>
-          <option value="visit">In-person Visit</option>
-          <option value="call">Phone Call</option>
-          <option value="email">Email</option>
-          <option value="conference">Conference</option>
-          <option value="sample_drop">Sample Drop</option>
-        </select>
-      </div>
-
-      <div className="field">
-        <label>Date</label>
-        <input
-          type="datetime-local"
-          value={form.interaction_date}
-          onChange={set('interaction_date')}
-        />
-      </div>
-
-      <div className="field">
-        <label>Notes (what happened)</label>
-        <textarea value={form.raw_notes} onChange={set('raw_notes')} />
-      </div>
-
-      <div className="field">
-        <label>AI Summary</label>
-        <textarea value={form.summary} onChange={set('summary')} />
+        <label>Attendees</label>
+        <input value={selectedHcp?.name || form.hcp_name || ''} placeholder="Enter names or search..." readOnly disabled />
       </div>
 
       <div className="field">
         <label>Topics Discussed</label>
-        <input
-          value={arrayToText(form.topics_discussed)}
-          onChange={setArray('topics_discussed')}
-          placeholder="comma-separated"
+        <textarea
+          value={arrayToText(form.topics_discussed) || form.raw_notes}
+          placeholder="Enter key discussion points..."
+          readOnly
+          disabled
         />
-        <div className="chip-row" style={{ marginTop: 6 }}>
-          {form.topics_discussed?.map((t, i) => (
-            <span className="chip" key={i}>{t}</span>
+      </div>
+
+      <button className="link-action" type="button" disabled>
+        Summarize from Voice Note (Requires Consent)
+      </button>
+
+      <div className="section-heading">Materials Shared / Samples Distributed</div>
+      <div className="material-box">
+        <div>
+          <strong>Materials Shared</strong>
+          <p>{arrayToText(form.products_discussed) || 'No materials added.'}</p>
+        </div>
+        <button className="mini-btn" type="button" disabled>Search/Add</button>
+      </div>
+
+      <div className="material-box">
+        <div>
+          <strong>Samples Distributed</strong>
+          <p>{arrayToText(form.samples_distributed) || 'No samples added.'}</p>
+        </div>
+        <button className="mini-btn" type="button" disabled>Add Sample</button>
+      </div>
+
+      <div className="field">
+        <label>Observed/Inferred HCP Sentiment</label>
+        <div className="sentiment-options" aria-disabled="true">
+          {['positive', 'neutral', 'negative'].map((sentiment) => (
+            <label key={sentiment} className="sentiment-option">
+              <input
+                type="radio"
+                checked={form.sentiment === sentiment}
+                readOnly
+                disabled
+              />
+              <span>{sentiment[0].toUpperCase() + sentiment.slice(1)}</span>
+            </label>
           ))}
         </div>
       </div>
 
       <div className="field">
-        <label>Products Discussed</label>
-        <input
-          value={arrayToText(form.products_discussed)}
-          onChange={setArray('products_discussed')}
-          placeholder="comma-separated"
+        <label>Outcomes</label>
+        <textarea
+          value={form.summary}
+          placeholder="Key outcomes or agreements..."
+          readOnly
+          disabled
         />
       </div>
 
       <div className="field">
-        <label>Samples Distributed</label>
-        <input
-          value={arrayToText(form.samples_distributed)}
-          onChange={setArray('samples_distributed')}
-          placeholder="comma-separated"
+        <label>Follow-up Actions</label>
+        <textarea
+          value={form.next_action}
+          placeholder="Enter next steps or tasks..."
+          readOnly
+          disabled
         />
       </div>
 
-      <div className="field">
-        <label>Sentiment</label>
-        <select value={form.sentiment} onChange={set('sentiment')}>
-          <option value="positive">Positive</option>
-          <option value="neutral">Neutral</option>
-          <option value="negative">Negative</option>
-        </select>
-        <span className={`sentiment-badge sentiment-${form.sentiment}`} style={{ marginTop: 6 }}>
-          {form.sentiment}
-        </span>
+      <div className="ai-suggestions">
+        <strong>AI Suggested Follow-ups:</strong>
+        <span>{form.next_action || 'Follow-up suggestions will appear after the assistant logs the interaction.'}</span>
       </div>
-
-      <div className="field">
-        <label>Next Action</label>
-        <input value={form.next_action} onChange={set('next_action')} />
-      </div>
-
-      <div className="field">
-        <label>Follow-up Date</label>
-        <input type="datetime-local" value={form.follow_up_date || ''} onChange={set('follow_up_date')} />
-      </div>
-
-      <div style={{ display: 'flex', gap: 8 }}>
-        <button className="btn btn-primary" onClick={handleSave} disabled={!form.hcp_id || status === 'saving'}>
-          {form.id ? 'Save Changes' : 'Log Interaction'}
-        </button>
-        <button className="btn btn-ghost" onClick={() => dispatch(resetForm())}>
-          Clear
-        </button>
-      </div>
-      {status === 'saved' && <p className="hint-text">Saved ✓</p>}
-      {status === 'error' && <p className="hint-text" style={{ color: 'var(--color-negative)' }}>Failed to save.</p>}
-    </div>
+    </section>
   )
 }

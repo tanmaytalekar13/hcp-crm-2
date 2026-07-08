@@ -40,7 +40,7 @@ class InteractionBase(BaseModel):
 
 
 class InteractionCreate(InteractionBase):
-    created_via: str = "form"
+    created_via: str = "chat"
 
 
 class InteractionUpdate(BaseModel):
@@ -70,6 +70,5 @@ class InteractionOut(InteractionBase):
 class ChatRequest(BaseModel):
     session_id: str
     message: str
-    # optional partially-filled form state the user has already edited manually,
-    # so the agent can merge rather than overwrite
+    # Optional agent-controlled form snapshot for future merge workflows.
     current_form_state: Optional[dict[str, Any]] = None

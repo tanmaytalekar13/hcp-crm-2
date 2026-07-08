@@ -7,9 +7,9 @@ Role of the agent:
 - Holds short-term conversational memory (per session_id) so a rep can say
   "log a visit with Dr. Mehta" then, a few turns later, "actually change the
   sentiment to positive" without repeating context.
-- Decides which of its 5 tools to call based on intent: look up an HCP,
-  create an interaction, edit one, pull history for context, or schedule a
-  follow-up.
+- Decides which tool to call based on intent: look up or create an HCP, create
+  an interaction, edit one, pull history for context, summarize a consented
+  voice note, add materials/samples, record outcomes, or schedule a follow-up.
 - Uses llama-3.3-70b-versatile (via Groq) as the reasoning/tool-calling model
   for orchestration, since it follows tool-use loops reliably. gemma2-9b-it
   (mandated by the task) does the actual required work: it's the model that
@@ -27,14 +27,14 @@ from sqlalchemy.orm import Session
 from app.agent.llm import get_fallback_llm
 from app.agent.tools import build_tools
 
-# Hard ceiling on how many times the agent may call a tool in one turn.
+# Hard ceiling on how many times the agent may call tools in one turn.
 # gemma2-9b-it is used inside the tools themselves (log_interaction /
 # edit_interaction) for the mandated summarization/extraction step, but the
 # *orchestration* LLM below is llama-3.3-70b-versatile: small models like
 # gemma2-9b-it are unreliable at knowing when to stop calling tools, which
 # was causing infinite agent<->tools loops and hitting LangGraph's recursion
 # limit. This cap guarantees the graph always terminates.
-MAX_TOOL_CALLS_PER_TURN = 6
+MAX_TOOL_CALLS_PER_TURN = 10
 
 SYSTEM_PROMPT = """You are the AI assistant embedded in the "Log Interaction" \
 screen of a pharma CRM used by field representatives calling on Healthcare \
@@ -45,12 +45,28 @@ with them, using your tools rather than asking them to fill out a form.
 
 Rules:
 - If the rep mentions a doctor by name and you don't already know their hcp_id \
-  from earlier in this conversation, call search_hcp first.
+  from earlier in this conversation, call search_hcp first. search_hcp may \
+  return fuzzy matches with match_score/match_reason; use a strong match \
+  instead of creating a duplicate.
+- If search_hcp returns no match but the rep provided a doctor's name, call \
+  create_hcp with the extracted name plus any hospital, specialty, or city they \
+  mentioned. Use "Unknown/Not Provided" only when specialty is absent; do not \
+  invent clinical details.
 - When the rep describes what happened in a visit/call (products discussed, \
   samples left, doctor's reaction, next steps), call log_interaction with their \
-  account as raw_notes - don't ask them to restate it in a rigid format.
+  account as raw_notes - don't ask them to restate it in a rigid format. Include \
+  the interaction_date argument when the rep mentions a specific date/time. If \
+  you just created an HCP, use that new hcp_id for log_interaction.
 - If the rep wants to correct or add detail to something already logged, use \
   edit_interaction.
+- If the rep provides a voice-note transcript, ask/verify consent first, then \
+  call summarize_voice_note before logging or editing.
+- If the rep says they shared materials, brochures, clinical papers, trial \
+  data, or leave-behinds after an interaction exists, call add_materials_shared.
+- If the rep says they distributed samples after an interaction exists, call \
+  add_samples_distributed.
+- If the rep states an outcome or agreement after an interaction exists, call \
+  record_outcome.
 - If they ask what was discussed last time, use get_interaction_history.
 - If they mention a future commitment (send a study, another visit date, a \
   lunch-and-learn), use schedule_followup after logging.
@@ -60,12 +76,11 @@ Critical rules about IDs and tool errors:
 - NEVER invent, guess, or reuse a placeholder value for hcp_id or \
   interaction_id (e.g. do not write "logged_interaction_id" or "12345" or \
   similar). Only use an id exactly as it appears in the "id" field of a \
-  tool's JSON result (from search_hcp, log_interaction, edit_interaction, or \
-  get_interaction_history).
-- If search_hcp returns an empty "matches" list, that HCP does not exist in \
-  the system. Do NOT call any other tool with a made-up hcp_id in this case. \
-  Instead, tell the rep plainly that no matching HCP was found and ask them \
-  to check the spelling or confirm the HCP needs to be added first.
+  tool's JSON result (from search_hcp, create_hcp, log_interaction, \
+  edit_interaction, or get_interaction_history).
+- If search_hcp returns an empty "matches" list, do not invent an hcp_id. If \
+  the rep gave a usable doctor name, call create_hcp and then use the id from \
+  create_hcp's "hcp" object. If the name is unclear, ask the rep to confirm it.
 - If a tool's JSON result contains an "error" field, treat that step as \
   failed: do NOT call a follow-up tool that depends on its output (e.g. do \
   not call schedule_followup if log_interaction just returned an error). \
