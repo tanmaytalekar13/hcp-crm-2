@@ -95,15 +95,19 @@ export default function StructuredForm() {
       <div className="field">
         <label>Observed/Inferred HCP Sentiment</label>
         <div className="sentiment-options" aria-disabled="true">
-          {['positive', 'neutral', 'negative'].map((sentiment) => (
-            <label key={sentiment} className="sentiment-option">
+          {[
+            { value: 'positive', label: 'Positive 😊' },
+            { value: 'neutral', label: 'Neutral 😐' },
+            { value: 'negative', label: 'Negative 😕' },
+          ].map((sentiment) => (
+            <label key={sentiment.value} className="sentiment-option">
               <input
                 type="radio"
-                checked={form.sentiment === sentiment}
+                checked={form.sentiment === sentiment.value}
                 readOnly
                 disabled
               />
-              <span>{sentiment[0].toUpperCase() + sentiment.slice(1)}</span>
+              <span>{sentiment.label}</span>
             </label>
           ))}
         </div>

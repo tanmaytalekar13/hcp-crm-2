@@ -1,12 +1,20 @@
 import { createSlice, createAsyncThunk } from '@reduxjs/toolkit'
 import { apiGet } from '../../api/client'
 
+const formatLocalDatetime = (value) => {
+  if (!value) return ''
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
 const emptyForm = {
   id: null,
   hcp_id: '',
   hcp_name: '',
   interaction_type: 'visit',
-  interaction_date: new Date().toISOString().slice(0, 16),
+  interaction_date: formatLocalDatetime(new Date()),
   raw_notes: '',
   summary: '',
   topics_discussed: [],
@@ -41,7 +49,7 @@ const interactionSlice = createSlice({
         hcp_name: interaction.hcp_name || state.form.hcp_name,
         interaction_type: interaction.interaction_type || state.form.interaction_type,
         interaction_date: interaction.interaction_date
-          ? interaction.interaction_date.slice(0, 16)
+          ? formatLocalDatetime(interaction.interaction_date)
           : state.form.interaction_date,
         raw_notes: interaction.raw_notes || state.form.raw_notes,
         summary: interaction.summary || state.form.summary,
@@ -51,7 +59,7 @@ const interactionSlice = createSlice({
         sentiment: interaction.sentiment || state.form.sentiment,
         next_action: interaction.next_action || state.form.next_action,
         follow_up_date: interaction.follow_up_date
-          ? interaction.follow_up_date.slice(0, 16)
+          ? formatLocalDatetime(interaction.follow_up_date)
           : state.form.follow_up_date,
         is_edited: interaction.is_edited || false,
       }
