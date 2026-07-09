@@ -8,8 +8,8 @@ Role of the agent:
   "log a visit with Dr. Mehta" then, a few turns later, "actually change the
   sentiment to positive" without repeating context.
 - Decides which tool to call based on intent: look up or create an HCP, create
-  an interaction, edit one, pull history for context, summarize a consented
-  voice note, add materials/samples, record outcomes, or schedule a follow-up.
+  an interaction, edit one, pull history for context, add materials/samples,
+  record outcomes, or schedule a follow-up.
 - Uses llama-3.3-70b-versatile (via Groq) as the reasoning/tool-calling model
   for orchestration, since it follows tool-use loops reliably. gemma2-9b-it
   (mandated by the task) does the actual required work: it's the model that
@@ -18,7 +18,7 @@ Role of the agent:
 """
 from typing import Annotated, TypedDict
 
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import SystemMessage, trim_messages
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
@@ -35,6 +35,18 @@ from app.agent.tools import build_tools
 # was causing infinite agent<->tools loops and hitting LangGraph's recursion
 # limit. This cap guarantees the graph always terminates.
 MAX_TOOL_CALLS_PER_TURN = 10
+
+# How many of the most recent messages (across the whole session, not just
+# this turn) get sent to the orchestrator LLM. AgentState.messages grows for
+# the entire life of a chat session via the add_messages reducer, and every
+# call_model invocation resends the system prompt + all tool schemas anyway
+# - if we also resend the full, ever-growing message history, token usage
+# grows roughly quadratically with how long the rep keeps chatting. Trimming
+# to a rolling window keeps cost flat while still giving the model enough
+# recent context (e.g. "actually change the sentiment to positive" a few
+# turns after logging). The full history still lives in Postgres
+# (ChatMessage) for anything that needs the complete record.
+MAX_HISTORY_MESSAGES = 20
 
 SYSTEM_PROMPT = """You are the AI assistant embedded in the "Log Interaction" \
 screen of a pharma CRM used by field representatives calling on Healthcare \
@@ -59,8 +71,6 @@ Rules:
   you just created an HCP, use that new hcp_id for log_interaction.
 - If the rep wants to correct or add detail to something already logged, use \
   edit_interaction.
-- If the rep provides a voice-note transcript, ask/verify consent first, then \
-  call summarize_voice_note before logging or editing.
 - If the rep says they shared materials, brochures, clinical papers, trial \
   data, or leave-behinds after an interaction exists, call add_materials_shared.
 - If the rep says they distributed samples after an interaction exists, call \
@@ -70,6 +80,13 @@ Rules:
 - If they ask what was discussed last time, use get_interaction_history.
 - If they mention a future commitment (send a study, another visit date, a \
   lunch-and-learn), use schedule_followup after logging.
+- When calling schedule_followup, reuse the specific next_action text that \
+  log_interaction (or edit_interaction) already returned for this interaction \
+  - do NOT replace it with a generic placeholder like "Follow up" or \
+  "Follow-up visit". Only write a new next_action value if the rep is giving \
+  you genuinely new or more specific information beyond what was already \
+  recorded (e.g. combine both: "Send long-term safety data; schedule visit \
+  for next Tuesday" rather than dropping the safety-data commitment).
 - Keep replies brief, professional, and confirm what was recorded.
 
 Critical rules about IDs and tool errors:
@@ -99,10 +116,24 @@ def build_graph(db: Session):
     tools = build_tools(db)
     llm = get_fallback_llm(temperature=0.1).bind_tools(tools)
 
+    def _windowed_messages(messages: list) -> list:
+        """Cap what gets sent to the LLM to the most recent
+        MAX_HISTORY_MESSAGES messages (always keeping/re-adding the system
+        prompt), instead of resending the entire session history every turn."""
+        non_system = [m for m in messages if not isinstance(m, SystemMessage)]
+        trimmed = trim_messages(
+            non_system,
+            strategy="last",
+            token_counter=len,  # treat each message as weight 1 -> caps message COUNT
+            max_tokens=MAX_HISTORY_MESSAGES,
+            start_on="human",
+            include_system=False,
+            allow_partial=False,
+        )
+        return [SystemMessage(content=SYSTEM_PROMPT)] + trimmed
+
     def call_model(state: AgentState):
-        messages = state["messages"]
-        if not any(isinstance(m, SystemMessage) for m in messages):
-            messages = [SystemMessage(content=SYSTEM_PROMPT)] + messages
+        messages = _windowed_messages(state["messages"])
 
         count = state.get("tool_call_count", 0)
         if count >= MAX_TOOL_CALLS_PER_TURN:

@@ -7,10 +7,9 @@ The LangGraph tools available to the HCP interaction agent.
 4. edit_interaction      - modify a previously logged interaction (keeps an audit trail)
 5. get_interaction_history - pull past interactions with an HCP for context ("what did we discuss last time?")
 6. schedule_followup     - set/update the next-action + follow-up date on an interaction
-7. summarize_voice_note  - summarize a consented voice-note transcript before logging
-8. add_materials_shared  - add/search selected materials to an interaction
-9. add_samples_distributed - add distributed samples to an interaction
-10. record_outcome       - update outcomes/agreements from chat
+7. add_materials_shared  - add/search selected materials to an interaction
+8. add_samples_distributed - add distributed samples to an interaction
+9. record_outcome        - update outcomes/agreements from chat
 
 Each tool is created as a closure bound to a live SQLAlchemy session so the
 agent can be re-instantiated per request (per chat session) with its own DB
@@ -30,7 +29,7 @@ errors for the rest of the turn.
 import json
 import re
 import uuid as uuid_lib
-from datetime import datetime
+from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from typing import Optional, List, Union
 
@@ -43,6 +42,18 @@ from app.agent.llm import get_primary_llm
 STOPWORDS = {
     "dr", "doctor", "the", "from", "at", "hospital", "clinic", "medical",
     "center", "centre", "city", "and", "of", "in",
+}
+
+# Generic/filler next_action phrases the orchestrator LLM sometimes invents
+# when calling schedule_followup (e.g. just "Follow up" or "Follow-up visit").
+# These should never be allowed to clobber a specific, already-extracted
+# next_action like "Send long-term safety data" — see schedule_followup below.
+GENERIC_NEXT_ACTION_PHRASES = {
+    "follow up", "follow-up", "followup",
+    "schedule follow up", "schedule a follow up", "schedule follow-up",
+    "schedule a follow-up", "schedule follow up visit",
+    "schedule a follow-up visit", "schedule follow-up visit",
+    "follow up visit", "follow-up visit", "followup visit",
 }
 
 
@@ -195,7 +206,20 @@ def _heuristic_fallback(raw_text: str) -> dict:
     }
 
 
-def _infer_sentiment(raw_text: str) -> str:
+def _infer_sentiment(raw_text: str, return_confidence: bool = False):
+    """Heuristic sentiment reader.
+
+    Returns just the sentiment string by default. Pass return_confidence=True
+    to also get back "strong" or "weak":
+      - "strong": an unambiguous arc pattern matched (e.g. "skeptical ...
+        but became interested"). These are reliable enough to override even
+        a non-neutral sentiment the extraction LLM already produced, because
+        the LLM (a small/cheap model) tends to anchor on the first
+        sentiment-coded word in a sentence ("skeptical") rather than reading
+        the whole arc through to "became interested" / "agreed".
+      - "weak": a plain keyword-count read, only trustworthy enough to fill
+        in when the LLM returned "neutral" (i.e. said nothing useful).
+    """
     text = _normalize_text(raw_text)
     positive_phrases = (
         "strong interest", "very interested", "showed interest", "interested in",
@@ -208,11 +232,30 @@ def _infer_sentiment(raw_text: str) -> str:
         "concerns", "skeptical", "not convinced", "unhappy", "negative",
         "refused", "pushed back", "pushback",
     )
-    if any(phrase in text for phrase in negative_phrases):
-        return "negative"
+    positive_matches = sum(1 for phrase in positive_phrases if phrase in text)
+    negative_matches = sum(1 for phrase in negative_phrases if phrase in text)
+
+    def _result(sentiment: str, confidence: str):
+        return (sentiment, confidence) if return_confidence else sentiment
+
+    # Strong, deterministic "arc" patterns — checked first and treated as
+    # authoritative regardless of raw keyword counts.
+    if "but became interested" in text or "but became" in text or "however became interested" in text:
+        return _result("positive", "strong")
+    if "initially skeptical" in text and "interested" in text:
+        return _result("positive", "strong")
+    if "initially skeptical" in text and "agreed" in text:
+        return _result("positive", "strong")
+
+    if positive_matches > negative_matches:
+        return _result("positive", "weak")
+    if negative_matches > positive_matches:
+        return _result("negative", "weak")
     if any(phrase in text for phrase in positive_phrases):
-        return "positive"
-    return "neutral"
+        return _result("positive", "weak")
+    if any(phrase in text for phrase in negative_phrases):
+        return _result("negative", "weak")
+    return _result("neutral", "weak")
 
 
 def _infer_topics(raw_text: str) -> list[str]:
@@ -222,6 +265,8 @@ def _infer_topics(raw_text: str) -> list[str]:
         topics.append("clinical trial data")
     if "diabetes" in text:
         topics.append("diabetes portfolio")
+    if "oncology" in text:
+        topics.append("oncology portfolio")
     if "efficacy" in text:
         topics.append("efficacy")
     if "safety" in text:
@@ -234,31 +279,81 @@ def _infer_products(raw_text: str) -> list[str]:
     products = []
     if "diabetes portfolio" in text:
         products.append("diabetes portfolio")
+    if "oncology portfolio" in text:
+        products.append("oncology portfolio")
     if "antibiotic" in text:
         products.append("antibiotic product")
     return products
 
 
 def _infer_next_action(raw_text: str) -> str:
+    """Build a next_action string from raw notes. Unlike the old version,
+    this can combine more than one distinct commitment (e.g. "send safety
+    data" AND "visit next Tuesday") instead of the first matching branch
+    silently winning and dropping the rest, and it never falls back to the
+    bare word "follow up" when a more specific action is identifiable."""
     text = _normalize_text(raw_text)
-    if "clinical trial data" in text or "trial data" in text:
-        return "Send additional clinical trial data"
-    if "follow up" in text or "followup" in text:
-        return "Follow up with HCP"
-    return ""
+    actions: list[str] = []
+
+    if "long term safety data" in text or ("safety data" in text and "requested" in text):
+        actions.append("Send long-term safety data")
+    elif "clinical trial data" in text or "trial data" in text:
+        actions.append("Send additional clinical trial data")
+
+    if "next tuesday" in text:
+        actions.append("Schedule follow-up visit for next Tuesday")
+    elif "follow up visit" in text or "follow-up visit" in text or "followup visit" in text:
+        actions.append("Schedule follow-up visit")
+    elif not actions and ("follow up" in text or "followup" in text or "follow-up" in text):
+        actions.append("Schedule a follow-up visit")
+
+    if not actions and ("evaluate the product" in text or "agreed to evaluate" in text):
+        actions.append("Check back after their evaluation")
+
+    return "; ".join(actions)
+
+
+def _infer_follow_up_date(raw_text: str) -> Optional[str]:
+    text = _normalize_text(raw_text)
+    if "next tuesday" in text:
+        today = datetime.utcnow().date()
+        target_weekday = 1  # Tuesday
+        days_ahead = (target_weekday - today.weekday() + 7) % 7
+        if days_ahead == 0:
+            days_ahead = 7
+        return (today + timedelta(days=days_ahead)).isoformat()
+    if "tomorrow" in text:
+        return (datetime.utcnow().date() + timedelta(days=1)).isoformat()
+    if "next week" in text:
+        return (datetime.utcnow().date() + timedelta(days=7)).isoformat()
+    return None
 
 
 def _stabilize_extracted_fields(raw_text: str, extracted: dict) -> dict:
     stabilized = dict(extracted or {})
-    semantic_sentiment = _infer_sentiment(raw_text)
-    if semantic_sentiment != "neutral" and stabilized.get("sentiment", "neutral") == "neutral":
+
+    # Sentiment: strong deterministic arc-patterns always win, even over a
+    # non-neutral sentiment the extraction LLM already produced (that's the
+    # fix — previously this only ever filled in when the LLM said
+    # "neutral", so a wrongly-guessed "negative" from the LLM was never
+    # corrected). Weak/keyword-count heuristics keep the old, more
+    # conservative behavior of only filling in a "neutral" gap.
+    semantic_sentiment, confidence = _infer_sentiment(raw_text, return_confidence=True)
+    if confidence == "strong":
         stabilized["sentiment"] = semantic_sentiment
+    elif semantic_sentiment != "neutral" and stabilized.get("sentiment", "neutral") == "neutral":
+        stabilized["sentiment"] = semantic_sentiment
+
     if not stabilized.get("topics_discussed"):
         stabilized["topics_discussed"] = _infer_topics(raw_text)
     if not stabilized.get("products_discussed"):
         stabilized["products_discussed"] = _infer_products(raw_text)
     if not stabilized.get("next_action"):
         stabilized["next_action"] = _infer_next_action(raw_text)
+    if not stabilized.get("interaction_date"):
+        stabilized["interaction_date"] = _infer_follow_up_date(raw_text)
+    if not stabilized.get("follow_up_date"):
+        stabilized["follow_up_date"] = _infer_follow_up_date(raw_text)
     return stabilized
 
 
@@ -285,6 +380,15 @@ def _extract_structured_fields(raw_text: str) -> dict:
         prompt = f"""You are a life-sciences CRM assistant. Extract structured data from
 a field representative's account of a Healthcare Professional (HCP) interaction.
 
+Pay close attention to the FULL arc of the interaction, not just the first
+sentiment-coded word. For example "she was initially skeptical but became
+interested after reviewing the data" is POSITIVE overall, not negative -
+read to the end of the sentence/paragraph before deciding sentiment.
+
+If the rep mentions more than one distinct next step (e.g. both "send more
+data" and "visit again next week"), include both, semicolon-separated, in
+next_action - do not collapse them into a generic phrase like "Follow up".
+
 Return ONLY valid JSON, no markdown fences, no commentary, matching this schema:
 {{
   "summary": "one or two sentence professional summary",
@@ -292,7 +396,7 @@ Return ONLY valid JSON, no markdown fences, no commentary, matching this schema:
   "products_discussed": ["list", "of", "drug/product", "names", "mentioned"],
   "samples_distributed": ["list", "of", "sample", "names", "if any, else empty list"],
   "sentiment": "positive | neutral | negative",
-  "next_action": "a short recommended next step, or empty string",
+  "next_action": "a short recommended next step (or several, semicolon-separated), or empty string",
   "interaction_type": "visit | call | email | conference | sample_drop",
   "interaction_date": "ISO-8601 datetime if the rep mentioned a date/time, else null"
 }}
@@ -470,26 +574,6 @@ def build_tools(db: Session):
             return json.dumps({"error": f"log_interaction failed: {e}"})
 
     @tool
-    def summarize_voice_note(voice_note_transcript: str, consent_confirmed: bool = False) -> str:
-        """Summarize a voice-note transcript only after the rep confirms consent.
-        This backs the UI's 'Summarize from Voice Note (Requires Consent)' affordance.
-        It does not save directly; it returns structured fields that the agent
-        can pass into log_interaction or edit_interaction."""
-        if not consent_confirmed:
-            return json.dumps({"error": "Consent is required before summarizing a voice note."})
-        if not voice_note_transcript or not voice_note_transcript.strip():
-            return json.dumps({"error": "voice_note_transcript is required"})
-        try:
-            extracted = _extract_structured_fields(voice_note_transcript)
-            return json.dumps({
-                "status": "summarized",
-                "voice_note_summary": extracted,
-            })
-        except Exception as e:
-            db.rollback()
-            return json.dumps({"error": f"summarize_voice_note failed: {e}"})
-
-    @tool
     def add_materials_shared(interaction_id: str, materials: str) -> str:
         """Add materials shared during a logged interaction. `materials` may be
         a JSON array string or comma-separated text, e.g. 'Brochure, Trial Data'.
@@ -665,7 +749,14 @@ def build_tools(db: Session):
         when the rep mentions a next step or future commitment. interaction_id
         MUST be the exact "id" field from that log_interaction call's result —
         never invent a placeholder id; if log_interaction failed, do not call
-        this tool at all, tell the rep it failed instead."""
+        this tool at all, tell the rep it failed instead.
+
+        Note on next_action: if the interaction already has a specific
+        next_action recorded (e.g. "Send long-term safety data") and this call
+        passes only a generic filler like "Follow up" or "Follow-up visit",
+        the specific action is preserved (with the visit appended) instead of
+        being overwritten — pass a specific value here only when you actually
+        have new/more precise information from the rep."""
         if not _valid_uuid(interaction_id):
             return json.dumps({"error": f"'{interaction_id}' is not a valid interaction_id. Use the exact id returned by log_interaction — do not invent one."})
         try:
@@ -676,7 +767,17 @@ def build_tools(db: Session):
             if not parsed_follow_up:
                 return json.dumps({"error": "follow_up_date must be a valid ISO date or datetime"})
             interaction.follow_up_date = parsed_follow_up
-            interaction.next_action = next_action
+
+            normalized_new = _normalize_text(next_action)
+            existing_next_action = (interaction.next_action or "").strip()
+            if existing_next_action and normalized_new in GENERIC_NEXT_ACTION_PHRASES:
+                if "follow" not in _normalize_text(existing_next_action):
+                    interaction.next_action = f"{existing_next_action}; Schedule follow-up visit"
+                # else: existing_next_action already mentions a follow-up visit,
+                # keep it as-is rather than replacing it with the generic text.
+            else:
+                interaction.next_action = next_action
+
             interaction.updated_at = datetime.utcnow()
             db.commit()
             db.refresh(interaction)
@@ -692,7 +793,6 @@ def build_tools(db: Session):
         edit_interaction,
         get_interaction_history,
         schedule_followup,
-        summarize_voice_note,
         add_materials_shared,
         add_samples_distributed,
         record_outcome,
